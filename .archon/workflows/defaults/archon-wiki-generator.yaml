@@ -1,0 +1,101 @@
+name: archon-wiki-generator
+description: |
+  Use when: User wants to generate documentation for all available Archon workflows and commands.
+  Triggers: "generate archon wiki", "update archon wiki", "build archon wiki", "archon wiki".
+  Does: Lists workflows and commands -> extracts metadata -> generates organized wiki -> saves to docs/.
+  NOT for: Running workflows, explaining code, or anything else.
+
+nodes:
+  - id: list-workflows
+    bash: |
+      cd /home/agentic-kiwi/Desktop/dev/dark-factory/Archon
+      bun run cli workflow list 2>/dev/null || echo "Failed to list workflows"
+    timeout: 30000
+
+  - id: list-commands
+    bash: |
+      COMMANDS_DIR="/home/agentic-kiwi/Desktop/dev/dark-factory/Archon/.archon/commands/defaults"
+      echo "=== Command Files ==="
+      for file in "$COMMANDS_DIR"/*.md; do
+        if [ -f "$file" ]; then
+          filename=$(basename "$file" .md)
+          echo ""
+          echo "--- $filename ---"
+          # Extract frontmatter (between first and second ---)
+          awk '/^---$/{p=!p; if(p) next; else exit} p' "$file"
+        fi
+      done
+    timeout: 30000
+
+  - id: generate-wiki
+    prompt: |
+      You are a technical writer. Generate a clean, well-organized wiki document for Archon's workflows and commands.
+
+      ## Workflow List Output
+      $list-workflows.output
+
+      ## Command Metadata Output
+      $list-commands.output
+
+      ## Instructions
+
+      Create a markdown document with these sections:
+
+      ### Section 1: Workflows
+
+      For EACH workflow from the list output, create an entry with:
+      - **Name**: The workflow name (e.g., `archon-plan`)
+      - **When to use**: Plain English description of when someone should use this
+      - **Triggers**: Example phrases that invoke this workflow
+      - **What it does**: Brief description of the workflow's actions
+      - **NOT for**: What this workflow should NOT be used for
+
+      Parse the workflow descriptions carefully - they follow the pattern:
+      ```
+      Use when: ...
+      Triggers: ...
+      Does: ...
+      NOT for: ...
+      ```
+
+      ### Section 2: Commands
+
+      For EACH command from the metadata output, create an entry with:
+      - **Name**: The command name (e.g., `archon-assist`)
+      - **Description**: From the `description:` frontmatter field
+      - **Arguments**: From the `argument-hint:` frontmatter field
+
+      Commands are building blocks used by workflows. They're not typically invoked directly by users.
+
+      ### Section 3: Quick Reference Table
+
+      Create a single table with ALL workflows and commands for fast scanning:
+
+      | Type | Name | One-line Summary |
+      |------|------|------------------|
+      | Workflow | archon-plan | Creates implementation plans from feature descriptions |
+      | Command | archon-assist | General assistance for questions and debugging |
+
+      ## Writing Style
+
+      - Use plain English, avoid jargon
+      - Be concise but complete
+      - Write so both humans AND Claude can use this to answer "what's the best workflow for X?"
+      - Use clear headings and consistent formatting
+      - Group related workflows together if logical
+
+      ## Output
+
+      Write the complete wiki document to: `$ARTIFACTS_DIR/archon-wiki.md`
+
+      Use the Write tool. The file must be valid markdown with proper headings.
+    model: sonnet
+    denied_tools: [Edit, Bash]
+    depends_on: [list-workflows, list-commands]
+
+  - id: save-wiki
+    bash: |
+      mkdir -p docs
+      cp "$ARTIFACTS_DIR/archon-wiki.md" docs/archon-wiki.md
+      echo "Saved wiki to docs/archon-wiki.md"
+    depends_on: [generate-wiki]

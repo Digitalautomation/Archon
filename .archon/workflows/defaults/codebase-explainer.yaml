@@ -1,0 +1,166 @@
+name: codebase-explainer
+description: |
+  Use when: A user wants to understand how a file or code component works.
+  Triggers: "explain this codebase", "what does this codebase do", "I don't understand how the code",
+            "help me understand this codebase", "explain this file", "what does this file do",
+            "how does this work", "explain the code", "understand this code", "code explanation".
+  Does: Extracts the target file path from the user's request, checks for existing documentation,
+        analyzes the source file like a coding tutor using real-world analogies, and saves a
+        markdown explanation to docs/code-explained/.
+  NOT for: Editing the codebase, adding features, making improvements, or modifying source code.
+
+  Run with --no-worktree (runs in the actual repo, not an isolated worktree):
+    bun run cli workflow run codebase-explainer --no-worktree "explain src/search.py"
+
+provider: claude
+
+nodes:
+  # ═══════════════════════════════════════════════════════════════
+  # NODE 1: EXTRACT PATH
+  # Use a fast, cheap model to pull the file path from natural language
+  # ═══════════════════════════════════════════════════════════════
+
+  - id: extract-path
+    model: haiku
+    prompt: |
+      Extract the file path from the user's request below. Return ONLY the raw file path
+      string — no quotes, no explanation, no markdown formatting.
+
+      If the user mentions a general area (e.g., "the search module") rather than a specific file,
+      use the available tools to find the most likely file and return its path.
+
+      If no file path can be determined, return the string "UNKNOWN".
+
+      ## User Request
+
+      $ARGUMENTS
+    output_format:
+      type: object
+      properties:
+        path:
+          type: string
+          description: "The extracted file path, or UNKNOWN if not determinable"
+      required:
+        - path
+
+  # ═══════════════════════════════════════════════════════════════
+  # NODE 2: CHECK EXISTING DOCS
+  # Deterministic bash check — does a doc already exist for this file?
+  # ═══════════════════════════════════════════════════════════════
+
+  - id: check-existing
+    depends_on: [extract-path]
+    bash: |
+      FILE_PATH="$extract-path.output.path"
+
+      # Extract just the basename, strip any quotes, and replace dots with underscores
+      # e.g., /path/to/search.py -> search_py.md
+      BASENAME=$(basename "$FILE_PATH" | tr -d "'" | tr -d '"')
+      FILENAME=$(echo "$BASENAME" | tr '.' '_').md
+
+      echo "target_filename=$FILENAME"
+
+      if [ -f "docs/code-explained/$FILENAME" ]; then
+        echo "exists=true"
+        echo "Note: Documentation already exists at docs/code-explained/$FILENAME"
+      else
+        echo "exists=false"
+      fi
+
+  # ═══════════════════════════════════════════════════════════════
+  # NODE 3: WRITE DOCUMENTATION
+  # AI reads the source file and produces markdown content
+  # denied_tools prevents any file writes — output only
+  # ═══════════════════════════════════════════════════════════════
+
+  - id: write-doc
+    depends_on: [extract-path, check-existing]
+    model: sonnet
+    denied_tools: [Edit, Bash, Write]
+    prompt: |
+      You are a friendly coding tutor who explains code using real-world analogies.
+
+      ## Target File
+
+      Read the file at: $extract-path.output.path
+
+      ## Existing Documentation Status
+
+      $check-existing.output
+
+      ## Instructions
+
+      1. Read the source file thoroughly
+      2. Analyze its purpose, structure, and how it fits into the larger codebase
+      3. If documentation already exists (exists=true), read the existing doc and UPDATE your
+         explanation with any new insights — don't just regenerate the same content
+      4. Return your explanation as markdown content following the format below
+
+      ## CRITICAL RULES
+
+      - You MUST return ONLY the markdown content as your final response
+      - Do NOT attempt to write any files — you don't have the tools for it
+      - Do NOT wrap the output in code fences — return raw markdown
+      - The save-doc node downstream will handle writing the file
+
+      ## Output Format
+
+      Return markdown with these sections:
+
+      # {filename} — Explained
+
+      ## Overview
+      A 2-3 sentence summary of what this file does and why it exists.
+      Use a real-world analogy (e.g., "Think of this like a traffic controller at an intersection...").
+
+      ## Key Concepts with Analogies
+      For each major concept, class, or pattern in the file:
+      - **Concept Name**: What it is in code terms
+      - **Analogy**: A relatable real-world comparison
+      - **Why it matters**: How it contributes to the system
+
+      ## Code Walkthrough
+      Walk through the file's logic step by step, explaining what each major section does.
+      Reference specific function names and line ranges.
+      Use analogies to explain complex logic.
+
+      ## How It Fits in the Codebase
+      - What imports/uses this file?
+      - What does this file depend on?
+      - Where does it sit in the overall architecture?
+
+  # ═══════════════════════════════════════════════════════════════
+  # NODE 4: SAVE DOCUMENTATION
+  # Bash node — the ONLY node that writes to disk
+  # ═══════════════════════════════════════════════════════════════
+
+  - id: save-doc
+    depends_on: [write-doc]
+    runtime: uv
+    script: |
+      import os
+      import sys
+
+      # Get the file path from the extract-path node output
+      file_path = '''$extract-path.output.path'''
+
+      # Extract basename and convert to safe filename (dots -> underscores)
+      basename = os.path.basename(file_path.strip().strip("'\""))
+      filename = basename.replace('.', '_') + '.md'
+
+      # Create output directory
+      os.makedirs('docs/code-explained', exist_ok=True)
+
+      # Get the markdown content from write-doc node
+      content = '''$write-doc.output'''
+
+      # Strip leading/trailing quotes if present (from shell escaping)
+      if content.startswith("'") and content.endswith("'"):
+          content = content[1:-1]
+
+      # Write to file
+      output_path = f'docs/code-explained/{filename}'
+      with open(output_path, 'w') as f:
+          f.write(content)
+
+      print(f"Documentation saved to {output_path}")
