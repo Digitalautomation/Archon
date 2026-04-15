@@ -1,0 +1,308 @@
+name: repo-wiki-generator
+description: |
+  Use when: You want to create a wiki for any codebase that is both human 
+  and AI readable. Useful for picking up where you left off on old projects.
+  Triggers: "create wiki", "generate repo wiki", "document this codebase",
+            "create wiki for /path/to/repo"
+  Does: Scans repo structure -> parallel deep scans -> flags unknowns ->
+        writes wiki to project docs/ -> appends unknowns to Archon log.
+  NOT for: Documenting Claude settings (use claude-wiki-generator).
+
+nodes:
+
+  # ═══════════════════════════════════════════════════════════════
+  # NODE 1: DISCOVER STRUCTURE
+  # Maps what exists in the repo — no AI, just bash
+  # Ignores noise folders that are never worth scanning
+  # ═══════════════════════════════════════════════════════════════
+
+  - id: scan-structure
+    bash: |
+      #!/bin/bash
+      IGNORE="node_modules|.git|dist|build|.next|__pycache__|.cache|coverage|.turbo|vendor|bin|.venv|venv"
+
+      echo "=== Repo Structure ==="
+      echo "Root: $(pwd)"
+      echo ""
+
+      echo "--- Top Level ---"
+      ls -la
+      echo ""
+
+      echo "--- Directory Tree (2 levels) ---"
+      find . -maxdepth 2 -type d \
+        | grep -vE "$IGNORE" \
+        | sort
+      echo ""
+
+      echo "--- Key Files ---"
+      for f in README.md package.json pyproject.toml Cargo.toml go.mod requirements.txt .env.example CLAUDE.md; do
+        if [ -f "$f" ]; then
+          echo "FOUND: $f"
+        fi
+      done
+      echo ""
+
+      echo "--- Unknown Top Level Dirs ---"
+      KNOWN="src|tests|test|docs|scripts|config|frontend|backend|packages|lib|public|assets|components|api|.archon|.claude|.github|saved-repos|output|outputs|data"
+      find . -maxdepth 1 -type d \
+        | grep -vE "$IGNORE" \
+        | grep -vE "$KNOWN" \
+        | grep -v "^\.$"
+    timeout: 30000
+
+
+  # ═══════════════════════════════════════════════════════════════
+  # NODE 2a: SCAN SOURCE CODE
+  # ═══════════════════════════════════════════════════════════════
+
+  - id: scan-src
+    depends_on: [scan-structure]
+    bash: |
+      #!/bin/bash
+      IGNORE="node_modules|.git|dist|build|__pycache__|.cache|coverage"
+
+      echo "=== Source Code ==="
+      for dir in src lib app components pages api backend; do
+        if [ -d "$dir" ]; then
+          echo "--- $dir/ ---"
+          find "$dir" -type f \
+            | grep -vE "$IGNORE" \
+            | sort
+          echo ""
+        fi
+      done
+
+      # Count files by extension
+      echo "--- File Types Found ---"
+      find . -type f \
+        | grep -vE "$IGNORE" \
+        | sed 's/.*\.//' \
+        | sort | uniq -c | sort -rn \
+        | head -20
+    timeout: 30000
+
+  # ═══════════════════════════════════════════════════════════════
+  # NODE 2b: SCAN TESTS
+  # ═══════════════════════════════════════════════════════════════
+
+  - id: scan-tests
+    depends_on: [scan-structure]
+    bash: |
+      #!/bin/bash
+      echo "=== Tests ==="
+      for dir in tests test __tests__ spec; do
+        if [ -d "$dir" ]; then
+          echo "--- $dir/ ---"
+          find "$dir" -type f | sort
+          echo ""
+        fi
+      done
+
+      # Also find test files scattered in src
+      echo "--- Test Files in Src ---"
+      find . -type f \
+        \( -name "*.test.*" -o -name "*.spec.*" \) \
+        | grep -vE "node_modules|dist" \
+        | sort
+    timeout: 30000
+
+  # ═══════════════════════════════════════════════════════════════
+  # NODE 2c: SCAN DOCS
+  # ═══════════════════════════════════════════════════════════════
+
+  - id: scan-docs
+    depends_on: [scan-structure]
+    bash: |
+      #!/bin/bash
+      echo "=== Documentation ==="
+
+      # Key docs in root
+      for f in README.md CHANGELOG.md CONTRIBUTING.md TODO.md NOTES.md; do
+        if [ -f "$f" ]; then
+          echo "--- $f ---"
+          cat "$f"
+          echo ""
+        fi
+      done
+
+      # Docs folder
+      if [ -d "docs" ]; then
+        echo "--- docs/ ---"
+        find docs -type f | sort
+        echo ""
+      fi
+    timeout: 30000
+
+  # ═══════════════════════════════════════════════════════════════
+  # NODE 2d: SCAN CONFIG
+  # ═══════════════════════════════════════════════════════════════
+
+  - id: scan-config
+    depends_on: [scan-structure]
+    timeout: 30000
+    bash: |
+      #!/bin/bash
+      echo "=== Configuration ==="
+
+      # Common config files
+      for f in package.json pyproject.toml docker-compose.yml Dockerfile \
+                tsconfig.json vite.config.ts next.config.js .archon/config.yaml CLAUDE.md; do
+        if [ -f "$f" ]; then
+          echo "--- $f ---"
+          cat "$f"
+          echo ""
+        fi
+      done
+
+      # ── Note .env files without reading them ──────────────────
+      echo "--- Environment Files (not read for security) ---"
+      find . -maxdepth 2 -name ".env*" \
+        | grep -vE "node_modules|dist" \
+        | sort
+
+  # ═══════════════════════════════════════════════════════════════
+  # NODE 2e: FLAG UNKNOWNS
+  # Compares what scan-structure found against known patterns
+  # Outputs anything unrecognised for human review
+  # ═══════════════════════════════════════════════════════════════
+
+  - id: flag-unknowns
+    depends_on: [scan-structure]
+    bash: |
+      #!/bin/bash
+      IGNORE="node_modules|.git|dist|build|.next|__pycache__|.cache|coverage|.turbo|vendor|bin|.venv|venv"
+      KNOWN="src|tests|test|docs|scripts|config|frontend|backend|packages|lib|public|assets|components|api|.archon|.claude|.github"
+
+      echo "=== Unknown Directories ==="
+      echo "Date: $(date '+%Y-%m-%d')"
+      echo "Repo: $(pwd)"
+      echo ""
+
+      UNKNOWNS=$(find . -maxdepth 1 -type d \
+        | grep -vE "$IGNORE" \
+        | grep -vE "$KNOWN" \
+        | grep -v "^\.$")
+
+      if [ -z "$UNKNOWNS" ]; then
+        echo "None found — all top level directories recognised."
+      else
+        echo "$UNKNOWNS"
+      fi
+    timeout: 30000
+
+  # ═══════════════════════════════════════════════════════════════
+  # NODE 3: WRITE WIKI
+  # Claude synthesizes all scan outputs into a structured wiki
+  # Both human and AI readable
+  # ═══════════════════════════════════════════════════════════════
+
+  - id: write-wiki
+    depends_on: [scan-src, scan-tests, scan-docs, scan-config, flag-unknowns]
+    model: sonnet
+    allowed_tools: [Write]
+    prompt: |
+      You are a technical writer creating a wiki for this codebase.
+      Your audience is both a human developer returning to this project 
+      after a long break AND an AI assistant helping them pick up where 
+      they left off.
+
+      ## Raw Scan Data
+
+      ### Structure
+      $scan-structure.output
+
+      ### Source Code
+      $scan-src.output
+
+      ### Tests
+      $scan-tests.output
+
+      ### Documentation
+      $scan-docs.output
+
+      ### Configuration
+      $scan-config.output
+
+      ### Unknown Directories
+      $flag-unknowns.output
+
+      ## Wiki to produce
+
+      Write a single markdown file with these sections:
+
+      ### 1. Project Overview
+      What is this project? What does it do? Infer from README, 
+      package.json, file names. 2-3 sentences max.
+
+      ### 2. Tech Stack
+      What languages, frameworks, and tools are being used?
+      Infer from file extensions and config files.
+      Use a simple table: | Technology | Purpose |
+
+      ### 3. Project Structure
+      A clean map of the codebase. What lives where and why.
+      Use a simple tree with one line descriptions.
+
+      ### 4. Key Files
+      The most important files someone returning to this project 
+      needs to know about. File path + one line description.
+
+      ### 5. Recent Activity
+      List any TODO, FIXME, or INCOMPLETE comments found in code.
+      List any unfinished files that look like work in progress.
+      Just facts — no interpretation.
+
+      ### 6. Unknown Directories
+      List anything flagged as unknown. Format as:
+      - `dirname/` — needs investigation
+
+      If none found write: _All directories recognised._
+
+      ## Writing rules
+      - Be concise. One sentence per item where possible.
+      - Use backticks for file names and paths.
+      - No nested bullets more than one level deep.
+      - Write as if briefing someone who built this but forgot everything.
+      - This document will be fed directly to an AI — make it information dense.
+
+      Write the complete document to: `$ARTIFACTS_DIR/repo-wiki.md`
+      Use the Write tool. Do NOT use Edit or Bash.
+
+  # ═══════════════════════════════════════════════════════════════
+  # NODE 4: SAVE FILES
+  # Saves wiki to project, appends unknowns to Archon log
+  # No AI — pure file operations
+  # ═══════════════════════════════════════════════════════════════
+
+  - id: save-files
+    depends_on: [write-wiki]
+    bash: |
+      #!/bin/bash
+      set -e
+
+      # ── Save wiki to project ──────────────────────────────────
+      mkdir -p docs
+      cp "$ARTIFACTS_DIR/repo-wiki.md" docs/repo-wiki.md
+      echo "✓ Wiki saved to docs/repo-wiki.md"
+
+      # ── Append unknowns to Archon log ─────────────────────────
+      ARCHON_DOCS="$HOME/Desktop/dev/dark-factory/Archon/docs"
+      mkdir -p "$ARCHON_DOCS"
+      LOG="$ARCHON_DOCS/wiki-unknowns-log.md"
+
+      # Only append if there were actual unknowns
+      UNKNOWNS="$flag-unknowns.output"
+
+      if echo "$UNKNOWNS" | grep -q "None found"; then
+        echo "✓ No unknowns to log"
+      else
+        echo "" >> "$LOG"
+        echo "## $(date '+%Y-%m-%d') — $(basename $(pwd))" >> "$LOG"
+        echo "$UNKNOWNS" >> "$LOG"
+        echo "✓ Unknowns appended to $LOG"
+      fi
+
+      echo ""
+      echo "Done. Run: cat docs/repo-wiki.md"
+    timeout: 30000
